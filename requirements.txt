@@ -1,0 +1,3 @@
+boto3
+requests
+tzdata  # Windows has no built-in time zone database
