@@ -1,6 +1,13 @@
 """SiteHeat tools. Site correction removed: two checks found no site-level signal (see docs)."""
 import math
+import os
+from urllib.parse import unquote
+
+import boto3
 import requests
+
+KB_ID = os.environ.get("SITEHEAT_KB_ID", "FLE31I76SM")  # managed knowledge base, ap-southeast-2
+KB_CHARS = 1200  # per chunk; keeps token cost down without cutting mid-answer
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -60,10 +67,34 @@ def compute_heat_stress(temperature_c: float, dew_point_c: float, wind_speed_ms:
     }
 
 
+def search_guidance(query: str) -> dict:
+    """Retrieve passages from the heat-safety corpus. No generation, no interpretation."""
+    kb = boto3.client("bedrock-agent-runtime", region_name="ap-southeast-2")
+    r = kb.retrieve(
+        knowledgeBaseId=KB_ID,
+        retrievalQuery={"text": query},
+        retrievalConfiguration={"managedSearchConfiguration": {"numberOfResults": 4}},
+    )
+
+    results = []
+    for hit in r["retrievalResults"]:
+        uri = hit["location"]["s3Location"]["uri"]
+        results.append({
+            "source": unquote(uri.split("/")[-1]),  # %20 back to spaces for readable citations
+            "score": round(hit["score"], 3),
+            "text": hit["content"]["text"][:KB_CHARS],
+        })
+
+    if not results:
+        return {"query": query, "results": [], "note": "No passage found in the guidance corpus."}
+    return {"query": query, "results": results}
+
+
 TOOL_FUNCTIONS = {
     "find_location": find_location,
     "get_forecast": get_forecast,
     "compute_heat_stress": compute_heat_stress,
+    "search_guidance": search_guidance,
 }
 
 # Converse API tool definitions. The descriptions are what the model reads to choose tools.
@@ -104,6 +135,21 @@ TOOL_SPECS = [
                 "wind_speed_ms": {"type": "number"},
             },
             "required": ["temperature_c", "dew_point_c", "wind_speed_ms"],
+        }},
+    }},
+    {"toolSpec": {
+        "name": "search_guidance",
+        "description": "Search Australian occupational heat-safety guidance from Safe Work Australia and "
+                       "WorkSafe Victoria. Use for any question about controls, symptoms of heat illness, "
+                       "employer or worker duties, rest breaks, PPE, acclimatisation or stop-work rules. "
+                       "Returns passages with their source document; it does not answer the question itself.",
+        "inputSchema": {"json": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "What to look for, in plain words, e.g. 'symptoms of heat stroke'"},
+            },
+            "required": ["query"],
         }},
     }},
 ]
